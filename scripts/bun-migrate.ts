@@ -96,9 +96,12 @@ for (const pattern of pkg.workspaces as string[])
     workspaceNames.add((await Bun.file(f).json()).name);
 let pinned = 0;
 for (const [name, set] of versions) {
-  if (set.size !== 1 || workspaceNames.has(name) || name in pkg.overrides) continue;
-  const v = [...set][0]!;
-  if (!/^\d/.test(v)) continue; // skip links, tarballs, git refs
+  if (workspaceNames.has(name) || name in pkg.overrides) continue;
+  const vs = [...set].filter((v) => /^\d/.test(v)); // skip links, tarballs, git refs
+  if (vs.length !== set.size || vs.length === 0) continue;
+  // several pnpm versions within one major: pin the newest one pnpm chose (bun would otherwise float above it)
+  if (new Set(vs.map((v) => v.split(".")[0])).size !== 1) continue;
+  const v = vs.sort((a, b) => Bun.semver.order(a, b)).at(-1)!;
   pkg.overrides[name] = v;
   pinned++;
 }
