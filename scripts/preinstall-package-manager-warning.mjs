@@ -343,6 +343,16 @@ export function enforceSupportedNodeRuntime(
   } = {},
   reportError = console.error,
 ) {
+  // bun-native fork: running directly under Bun 1.4.4+ is a supported runtime (no Node.js launcher needed).
+  if (
+    normalizeEnvValue(bunVersion) &&
+    isNodeVersionAtLeast(
+      parseNodeReleaseVersion(String(bunVersion).replace(/-.*$/, "")),
+      MINIMUM_BUN_VERSION,
+    )
+  ) {
+    return true;
+  }
   const detectedRuntime = normalizeEnvValue(bunVersion)
     ? probeNodeRuntime()
     : { version, execPath };

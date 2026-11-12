@@ -1,0 +1,6 @@
+[run]
+# node -> bun in package.json scripts (no Node.js on the build hosts)
+bun = true
+
+[install]
+linker = "isolated"
