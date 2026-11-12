@@ -1,0 +1,27 @@
+name: windows-native
+on:
+  push:
+    branches: [windows-native]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: shell + meeting-bot probes (Windows)
+        run: pnpm exec vitest run src/agents/shell-utils src/meeting-bot
+      - name: OPENCLAW_EXEC_SHELL=bash resolves a native bash
+        shell: pwsh
+        env:
+          OPENCLAW_EXEC_SHELL: bash
+        run: node --import ./scripts/tsx.mjs -e "import('./src/agents/shell-utils.ts').then(async m => { const c = await m.getShellConfig(); console.log(c.shell); if (!/bash\.exe$/i.test(c.shell)) process.exit(1) })"

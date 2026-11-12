@@ -27,7 +27,9 @@ type MeetingRuntimeSetupOptions<Config extends MeetingPluginConfig, Mode extends
 
 async function commandExists(runtime: PluginRuntime, command: string): Promise<boolean> {
   const result = await runtime.system.runCommandWithTimeout(
-    ["/bin/sh", "-lc", 'command -v "$1" >/dev/null 2>&1', "sh", command],
+    process.platform === "win32"
+      ? ["where.exe", "/q", command]
+      : ["/bin/sh", "-lc", 'command -v "$1" >/dev/null 2>&1', "sh", command],
     { timeoutMs: 5_000 },
   );
   return result.code === 0;

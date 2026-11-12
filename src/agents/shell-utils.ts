@@ -96,6 +96,10 @@ function getPosixShellArgs(shellPath: string): string[] {
 }
 
 function resolveWindowsBashPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const override = env.OPENCLAW_BASH?.trim();
+  if (override && fs.existsSync(override)) {
+    return override;
+  }
   const candidates = [env.ProgramFiles, env["ProgramFiles(x86)"]]
     .filter((dir): dir is string => Boolean(dir?.trim()))
     .map((dir) => path.join(dir, "Git", "bin", "bash.exe"));
@@ -188,6 +192,13 @@ export function buildShellCommandInvocation(
 
 export async function getShellConfig(): Promise<ShellConfig> {
   if (process.platform === "win32") {
+    // OPENCLAW_EXEC_SHELL=bash opts the exec tool into a native bash (OPENCLAW_BASH, niubash, Git Bash).
+    if (process.env.OPENCLAW_EXEC_SHELL?.trim().toLowerCase() === "bash") {
+      const bash = resolveWindowsBashPath();
+      if (bash) {
+        return resolveBashCommandConfig(bash);
+      }
+    }
     // Use PowerShell instead of cmd.exe on Windows.
     // Problem: Many Windows system utilities (ipconfig, systeminfo, etc.) write
     // directly to the console via WriteConsole API, bypassing stdout pipes.
@@ -304,6 +315,9 @@ export function detectRuntimeShell(): string | undefined {
   }
 
   if (process.platform === "win32") {
+    if (process.env.OPENCLAW_EXEC_SHELL?.trim().toLowerCase() === "bash") {
+      return "bash";
+    }
     if (process.env.POWERSHELL_DISTRIBUTION_CHANNEL) {
       return "pwsh";
     }

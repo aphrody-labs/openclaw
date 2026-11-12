@@ -43,7 +43,11 @@ export function createMeetingConfiguredNodeHost(
   };
 
   const probeCommand = (command: string, timeoutMs: number): "found" | "missing" | "timed-out" => {
-    const result = spawnSync("/bin/sh", ["-lc", 'command -v "$1" >/dev/null 2>&1', "sh", command], {
+    const [probe, ...probeArgs] =
+      process.platform === "win32"
+        ? ["where.exe", "/q", command]
+        : ["/bin/sh", "-lc", 'command -v "$1" >/dev/null 2>&1', "sh", command];
+    const result = spawnSync(probe, probeArgs, {
       encoding: "utf8",
       timeout: timeoutMs,
     });
