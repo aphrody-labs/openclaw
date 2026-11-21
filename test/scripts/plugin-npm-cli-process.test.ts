@@ -70,6 +70,7 @@ it("retains the ordinary CLI final authority after sharing acquisition reads", a
       f.records().filter((row) => row.kind === "request" && row.invocation === phase).length,
     ]),
   );
+  // Preview also acquires the immutable qualification waiver policy.
   expect(counts).toEqual({
     preview: 53,
     consume: 25,
