@@ -1576,12 +1576,19 @@ moved the package to a new versioned store directory. The updater that is alread
 installed runs these steps, so updates driven by 2026.11.4 or 2026.11.5 do not
 get them.
 
-When 2026.11.4 or 2026.11.5 updates a pnpm install to a release with this fix,
-it still publishes a launcher that points into its removed stage. The new
-package's Doctor, which runs during that update, repairs the launcher. Both of
-those updaters hand the later update steps to the new package, which restarts
-the Gateway on the new version. In test runs this first hop ended with a working
-CLI and Gateway.
+When 2026.11.4, 2026.11.5 or 2026.11.6 updates a pnpm install with a managed
+Gateway service to a release with this fix, it still publishes a launcher that points into its removed stage. The
+new package's Doctor, which runs during that update, repairs the launcher, so the
+`openclaw` command keeps working. These updaters hand the later update steps,
+including the Gateway restart, to the new package only when the update migrates
+the database schema. Otherwise they refuse the restart
+(`service-revalidation-failed`) and leave the Gateway stopped. When the service
+is this installation's own and still names the previous version's package, Doctor
+reports the recovery during that update, and `openclaw update status` and
+`openclaw gateway status --deep` name it afterwards: run
+`openclaw gateway install --force`, then `openclaw gateway restart`.
+`openclaw gateway restart` alone fails in that state, because the service still
+names the previous version's store directory.
 
 If `openclaw` still points into a missing `.openclaw-update-native-*` directory,
 the new package's Doctor and Gateway startup repair it. They rewrite a launcher
@@ -2614,9 +2621,15 @@ Managed systemd or launchd updates can stop the Gateway before an intermediate
 notice is delivered. The complete four-message sequence is not guaranteed for
 those installations; the durable run report remains available after reconnect.
 
-Runs with an internal origin session, including Control UI and webchat, receive
-these notices directly in that session's transcript. Passing only `sessionKey`
-is enough; the caller does not need to supply `deliveryContext`.
+For updates requested from a Control UI or desktop conversation, the app shows
+progress and the result in a persistent top-right notification instead of
+appending update messages to the conversation. The notification reconnects to the
+existing run after a Gateway restart. Dismiss the result or open Settings → Updates
+for the full report. Native mobile and other chat clients keep their current delivery.
+
+Other runs with an internal origin session receive these notices in that session’s
+transcript. Passing only `sessionKey` is enough; the caller does not need to
+supply `deliveryContext`.
 Before stopping the managed service, the updater waits for the serving Gateway
 to finish its restart notice attempt. That wait is capped at 10 seconds so a
 stalled notice cannot block activation.
