@@ -20,10 +20,6 @@ import {
 export const LIFETIME_CHECK_CALLS = [
   "captureOperatorToolGatewayAuthority",
   "resolveSessionRuntimeAuthority",
-  "captureHttpRequestAuthority",
-  "bindHttpResponseAuthority",
-  "retainExecApprovalsCurrentRead",
-  "createPluginRuntimeCapabilityLease",
   "captureAdmittedRunActiveAssertion",
   "captureGatewayToolCallerAssertion",
   "captureGatewayToolReceiptAssertion",

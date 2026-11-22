@@ -25,6 +25,7 @@ import {
   type FakeTransport as Api,
   type WireRequest,
 } from "./helpers/fake-model-transports.js";
+import { FORK_PLUGIN_ID, FORK_PROBE, writeForkProofPlugin } from "./helpers/fork-proof-plugin.js";
 import { listenProofProvider, useRuntimeProofFixture } from "./runtime-proof.test-support.js";
 
 const TOKEN = "prefix-stability-token";
@@ -183,6 +184,9 @@ export function usePrefixStabilityJourney() {
     // Cron stays on: a scheduled job runs into the target chat when it comes due.
     const fixture = await createFixture(`openclaw-prefix-stability-${api}-`, TOKEN, "0");
     const targetRequests: WireRequest[] = [];
+    const forkRequests: WireRequest[] = [];
+    const targetResponses: Array<{ id?: string; previousResponseId?: string }> = [];
+    const storedResponses = new Map<string, { input: unknown[]; output: unknown[] }>();
     // The hidden subagent: its spawn task turn has no inter-session provenance, later turns do.
     const childRequests: WireRequest[] = [];
     // The journey step that was active when each target request arrived, for failure reports.
@@ -250,6 +254,10 @@ export function usePrefixStabilityJourney() {
         unclassified.push(session);
         return { text: "child-done" };
       }
+      if (latest.includes(FORK_PROBE)) {
+        forkRequests.push(request);
+        return { text: "fork-done" };
+      }
       targetRequests.push(request);
       targetSteps.push(step);
       if (hasToolResult) {
@@ -271,7 +279,9 @@ export function usePrefixStabilityJourney() {
         slowSteps.add(slow);
         return {
           tool: "exec",
-          args: { command: `until [ -f '${gate}' ]; do sleep 0.1; done; echo slow-finished` },
+          args: {
+            command: `touch '${gate}.entered'; until [ -f '${gate}' ]; do sleep 0.1; done; echo slow-finished`,
+          },
         };
       }
       if (latest.includes("STEP-EXEC")) {
@@ -299,24 +309,62 @@ export function usePrefixStabilityJourney() {
       });
       request.on("end", () => {
         const json = JSON.parse(body) as Record<string, unknown>;
+        const previousResponseId =
+          typeof json.previous_response_id === "string" ? json.previous_response_id : undefined;
+        if (api === "openai-responses" && previousResponseId) {
+          const previous = storedResponses.get(previousResponseId);
+          if (!previous) {
+            response.writeHead(400).end(`Unknown response: ${previousResponseId}`);
+            return;
+          }
+          json.input = [...previous.input, ...previous.output, ...(json.input as unknown[])];
+        }
         const wire = readWireRequest(api, json);
         const reply = script(wire);
         const session = /session=(\S+)/.exec(wire.text)?.[1] ?? "?";
         seen.push(
           `${session} bytes=${body.length} last=${lastMessage(wire).slice(-300)} -> ${JSON.stringify(reply)}`,
         );
+        // Continued Responses requests count their expanded history, like a full request.
+        const sent = JSON.stringify(json);
         const wide = requestSession(wire) === WIDE;
         if (wide) {
-          wideBytes = Math.max(wideBytes, body.length);
+          wideBytes = Math.max(wideBytes, sent.length);
         }
-        writeReply(api, response, reply, ++ordinal, {
+        const result = writeReply(api, response, reply, ++ordinal, {
           // A provider counts an image as a fixed token cost, not its base64 length.
           inputTokens: Math.ceil(
-            (wide ? body.replace(/[A-Za-z0-9+/]{4096,}={0,2}/g, "") : body).length / 4,
+            (wide ? sent.replace(/[A-Za-z0-9+/]{4096,}={0,2}/g, "") : sent).length / 4,
           ),
           listed: toolNames(wire.tools),
           ...(typeof json.model === "string" ? { model: json.model } : {}),
         });
+        if (result) {
+          // Replay omits provider item IDs. Keep the same shape and field order as the client.
+          const output = result.output.map((item) => {
+            if ("role" in item) {
+              return {
+                type: item.type,
+                role: item.role,
+                content: item.content,
+                status: item.status,
+              };
+            }
+            if ("call_id" in item) {
+              return {
+                type: item.type,
+                call_id: item.call_id,
+                name: item.name,
+                arguments: item.arguments,
+              };
+            }
+            return item;
+          });
+          storedResponses.set(result.id, { input: json.input as unknown[], output });
+        }
+        if (targetRequests.at(-1) === wire) {
+          targetResponses.push({ id: result?.id, previousResponseId });
+        }
       });
     });
     let gateway: Awaited<ReturnType<typeof startGatewayWithClient>> | undefined;
@@ -324,7 +372,9 @@ export function usePrefixStabilityJourney() {
     let steersTaken = 0;
     let transportEnv: ReturnType<typeof captureEnv> | undefined;
     try {
-      const provider = buildFakeProvider(api, await listenProofProvider(server));
+      const provider = buildFakeProvider(api, await listenProofProvider(server), {
+        continuation: true,
+      });
       const runtime = fakeTransportRuntime(api);
       transportEnv = captureEnv(Object.keys(runtime.env));
       for (const [key, value] of Object.entries(runtime.env)) {
@@ -336,6 +386,7 @@ export function usePrefixStabilityJourney() {
         deleteTestEnvValue("OPENCLAW_BUNDLED_PLUGINS_DIR");
       }
       await fs.writeFile(path.join(fixture.workspaceDir, "AGENTS.md"), "# Rules\n- Be brief.\n");
+      const forkPlugin = await writeForkProofPlugin(fixture.stateDir);
       const cfg = fixture.config(
         provider,
         {
@@ -348,13 +399,15 @@ export function usePrefixStabilityJourney() {
         },
         {
           diagnostics: { cacheTrace: { enabled: true } },
-          plugins: runtime.pluginId
-            ? {
-                allow: [runtime.pluginId],
-                entries: { [runtime.pluginId]: { enabled: true } },
-                slots: { memory: "none" },
-              }
-            : { enabled: false },
+          plugins: {
+            allow: [FORK_PLUGIN_ID, ...(runtime.pluginId ? [runtime.pluginId] : [])],
+            load: { paths: [forkPlugin] },
+            entries: {
+              [FORK_PLUGIN_ID]: { enabled: true, hooks: { allowConversationAccess: true } },
+              ...(runtime.pluginId ? { [runtime.pluginId]: { enabled: true } } : {}),
+            },
+            slots: { memory: "none" },
+          },
           tools: {
             // The default surface: Tool Search on.
             codeMode: { enabled: false },
@@ -411,11 +464,17 @@ export function usePrefixStabilityJourney() {
           });
         }
       };
-      const start = (sessionKey: string, message: string, queueMode?: "steer") =>
+      const start = (
+        sessionKey: string,
+        message: string,
+        queueMode?: "steer",
+        attachments?: Array<Record<string, string>>,
+      ) =>
         client.request<{ runId?: string }>("chat.send", {
           sessionKey,
           message,
           ...(queueMode ? { queueMode } : {}),
+          ...(attachments ? { attachments } : {}),
           deliver: false,
           idempotencyKey: `prefix-stability-${api}-${++ordinal}`,
         });
@@ -431,9 +490,9 @@ export function usePrefixStabilityJourney() {
         await wait(`${sessionKey} ${message}`, await start(sessionKey, message));
         await settle();
       };
-      const reached = async (predicate: () => boolean) => {
+      const reached = async (predicate: () => boolean | Promise<boolean>) => {
         const deadline = Date.now() + 60_000;
-        while (!predicate()) {
+        while (!(await predicate())) {
           expect(Date.now(), seen.join("\n")).toBeLessThan(deadline);
           await new Promise((resolve) => {
             setTimeout(resolve, 100);
@@ -447,7 +506,63 @@ export function usePrefixStabilityJourney() {
       const sentToTarget = (marker: string) => targetRequests.some((r) => r.text.includes(marker));
 
       try {
+        step = "mid-turn fork";
+        const midTurn = await start(TARGET, "STEP-SLOW mid turn fork");
+        const midTurnGate = path.join(fixture.workspaceDir, "release-0");
+        await reached(() =>
+          fs.access(`${midTurnGate}.entered`).then(
+            () => true,
+            () => false,
+          ),
+        );
+        const liveParentRequest = targetRequests.at(-1)!;
+        const midTurnForkAt = forkRequests.length;
+        try {
+          const midTurnFork = await client.request<{ status: string; value?: unknown }>(
+            "prefixfork.run",
+            { sessionKey: TARGET, latest: true },
+            { timeoutMs: 65_000 },
+          );
+          expect(midTurnFork).toMatchObject({ status: "settled", value: "fork-settled" });
+          expect(forkRequests.length).toBeGreaterThan(midTurnForkAt);
+          const forkRequest = forkRequests[midTurnForkAt]!;
+          expect(forkRequest.system).toBe(liveParentRequest.system);
+          expect(forkRequest.tools).toBe(liveParentRequest.tools);
+          expect(
+            forkRequest.messages.slice(0, liveParentRequest.messages.length),
+            JSON.stringify(prefixBreaks([liveParentRequest, forkRequest]), null, 2),
+          ).toEqual(liveParentRequest.messages);
+          expect(targetRequests.at(-1)).toBe(liveParentRequest);
+        } finally {
+          await fs.writeFile(midTurnGate, "");
+        }
+        await wait("mid-turn fork parent", midTurn);
+        await settle();
+        step = "first turn";
         await send(TARGET, "TARGET first user turn");
+        step = "background fork between two parent turns";
+        const beforeFork = targetRequests.at(-1)!;
+        const parentResponseId = targetResponses.at(-1)!.id;
+        const fork = await client.request<{ status: string; value?: unknown }>(
+          "prefixfork.run",
+          { sessionKey: TARGET },
+          { timeoutMs: 65_000 },
+        );
+        expect(fork).toMatchObject({ status: "settled", value: "fork-settled" });
+        expect(forkRequests.length).toBeGreaterThan(0);
+        for (const request of forkRequests) {
+          expect(request.system).toBe(beforeFork.system);
+          expect(request.tools).toBe(beforeFork.tools);
+        }
+        const afterForkAt = targetRequests.length;
+        await send(TARGET, "TARGET after fork");
+        if (api === "openai-responses") {
+          expect(parentResponseId).toBeDefined();
+          expect(
+            targetResponses[afterForkAt]!.previousResponseId,
+            "The parent must continue from its own response, not the background fork.",
+          ).toBe(parentResponseId);
+        }
         // Exec completion wakes the session with a host system turn.
         await send(TARGET, "STEP-EXEC run the probe in the background");
         await until(() => targetRequests.some((r) => lastMessage(r).includes("exec-finished")));
@@ -465,15 +580,26 @@ export function usePrefixStabilityJourney() {
         await client.request("sessions.subscribe", {});
         const steered = await start(TARGET, "STEP-SLOW steer target");
         await reached(() => sentToTarget("STEP-SLOW steer target"));
-        // A steer from the chat composer; the tool is held until the run has taken it.
-        await start(TARGET, "STEER-INPUT arrives mid tool call", "steer");
+        // A steer from the chat composer with a document; the tool is held until the run has
+        // taken it. Later runs must replay the document text the model saw, not drop it.
+        await start(TARGET, "STEER-INPUT arrives mid tool call", "steer", [
+          {
+            type: "file",
+            mimeType: "text/plain",
+            fileName: "steer-notes.txt",
+            content: Buffer.from("STEER-DOC-BODY notes for the steered run").toString("base64"),
+          },
+        ]);
         await reached(() => steersTaken > 0);
-        await fs.writeFile(path.join(fixture.workspaceDir, "release-0"), "");
+        await fs.writeFile(path.join(fixture.workspaceDir, "release-1"), "");
         await wait("steer", steered);
         await until(() => sentToTarget("STEER-INPUT"));
-        // The steered input joins the same run, right after the tool result it waited for.
+        // The steered input joins the same run, right after the tool result it waited for, with
+        // its document text.
         expect(
-          targetRequests.some((r) => /slow-finished[\s\S]*STEER-INPUT/.test(lastMessage(r))),
+          targetRequests.some((r) =>
+            /slow-finished[\s\S]*STEER-INPUT[\s\S]*STEER-DOC-BODY/.test(lastMessage(r)),
+          ),
         ).toBe(true);
         step = "cron";
         const cronJob = {
@@ -541,7 +667,7 @@ export function usePrefixStabilityJourney() {
         await client.request("sessions.compact", { key: OTHER }, { timeoutMs: 65_000 });
         // The target tool call is still held open.
         expect(targetRequests.length).toBe(busyAt);
-        await fs.writeFile(path.join(fixture.workspaceDir, "release-1"), "");
+        await fs.writeFile(path.join(fixture.workspaceDir, "release-2"), "");
         await wait("busy", busy);
         await settle();
         const otherCompactionAt = otherRequests.length;
